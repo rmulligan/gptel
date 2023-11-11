@@ -27,6 +27,7 @@
 ;;; Code:
 
 (require 'gptel)
+(declare-function gptel-speak-response "gptel")
 
 (eval-when-compile
   (require 'cl-lib)

@@ -227,13 +227,18 @@ transient menu interface provided by `gptel-menu'."
   :group 'gptel
   :type 'file)
 
+(defcustom gptel-tts-enabled nil
+  "When non-nil, ChatGPT responses will be spoken aloud using TTS."
+  :group 'gptel
+  :type 'boolean)
+
 ;; FIXME This is convoluted, but it's not worth adding the `compat' dependency
 ;; just for a couple of helper functions either.
 (cl-macrolet
     ((gptel--compat
       () (if (version< "28.1" emacs-version)
              (macroexp-progn
-              `((defalias 'gptel--button-buttonize #'button-buttonize)
+              `((defalias 'gptel--button-buttonize #'buttonize)
                 (defalias 'gptel--always #'always)))
            (macroexp-progn
             `((defun gptel--always (&rest _)
@@ -291,13 +296,30 @@ will get progressively longer!"
   :type '(choice (integer :tag "Specify Token count")
                  (const :tag "Default" nil)))
 
-(defcustom gptel-model "gpt-3.5-turbo"
+(defcustom gptel-tts-model "tts-1"
+  "The TTS model used for text-to-speech."
+  :group 'gptel
+  :type 'string
+  )
+
+(defcustom gptel-tts-voice "alloy"
+  "The voice used for text-to-speech."
+  :group 'gptel
+  :type '(choice (const "alloy")
+                 (const "echo")
+                 (const "fable")
+                 (const "onyx")
+                 (const "nova")
+                 (const "shimmer")))
+
+(defcustom gptel-model "gpt-4-1106-preview"
   "GPT Model for chat.
 
 The current options for ChatGPT are
 - \"gpt-3.5-turbo\"
 - \"gpt-3.5-turbo-16k\"
 - \"gpt-4\" (experimental)
+- \"gpt-4-1106-preview\" (experimental)
 - \"gpt-4-32k\" (experimental)
  
 To set the model for a chat session interactively call
@@ -309,7 +331,26 @@ To set the model for a chat session interactively call
           (const :tag "GPT 3.5 turbo" "gpt-3.5-turbo")
           (const :tag "GPT 3.5 turbo 16k" "gpt-3.5-turbo-16k")
           (const :tag "GPT 4 (experimental)" "gpt-4")
+          (const :tag "GPT 4 Turbo (Preview)" "gpt-4-1106-preview")
           (const :tag "GPT 4 32k (experimental)" "gpt-4-32k")))
+
+
+(defun gptel-speak-response (response-text)
+  "Use the TTS API to speak the RESPONSE-TEXT by calling the Python script."
+  (message "Attempting to run TTS script")  ; Debugging message before the attempt
+  (let* ((virtualenv-activate-path "/Users/ryanmulligan/Zettels/configuration/.doom.d/python/openai-env/bin/activate")
+         (python-executable-path "/Users/ryanmulligan/Zettels/configuration/.doom.d/python/openai-env/bin/python3")
+         (python-script-path "/Users/ryanmulligan/Zettels/configuration/.doom.d/python/gptel-tts.py")
+         (source-and-run-command (format "source '%s' && '%s' '%s' --model '%s' --voice '%s' --text '%s'"
+                                         virtualenv-activate-path
+                                         python-executable-path
+                                         python-script-path
+                                         (shell-quote-argument (or gptel-tts-model "tts-1"))
+                                         (shell-quote-argument (or gptel-tts-voice "alloy"))
+                                         response-text)))
+    (message "Running TTS script command: %s" source-and-run-command)  ; Debugging message with command
+    (start-process-shell-command "gptel-tts" "*gptel-tts-output*" source-and-run-command)
+    (message "TTS script should be running now")))  ; Debugging message after the command
 
 (defcustom gptel-temperature 1.0
   "\"Temperature\" of ChatGPT response.
@@ -339,7 +380,7 @@ with differing settings.")
    :header (lambda () `(("Authorization" . ,(concat "Bearer " (gptel--get-api-key)))))
    :key #'gptel--get-api-key
    :stream t
-   :models '("gpt-3.5-turbo" "gpt-3.5-turbo-16k" "gpt-4" "gpt-4-32k")))
+   :models '("gpt-3.5-turbo" "gpt-3.5-turbo-16k" "gpt-4" "gpt-4-32k" "gpt-4-1106-preview")))
 
 (defvar-local gptel-backend gptel--openai)
 
@@ -1035,3 +1076,4 @@ text stream."
 
 (provide 'gptel)
 ;;; gptel.el ends here
+
