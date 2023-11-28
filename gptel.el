@@ -134,10 +134,12 @@ Leave it empty if you don't use a proxy."
   :type 'string)
 
 (defcustom gptel-api-key #'gptel-api-key-from-auth-source
-  "An OpenAI API key (string).
+  "An API key (string) for the default LLM backend.
+
+OpenAI by default.
 
 Can also be a function of no arguments that returns an API
-key (more secure)."
+key (more secure) for the active backend."
   :group 'gptel
   :type '(choice
           (string :tag "API key")
@@ -378,7 +380,7 @@ with differing settings.")
   (gptel-make-openai
    "ChatGPT"
    :header (lambda () `(("Authorization" . ,(concat "Bearer " (gptel--get-api-key)))))
-   :key #'gptel--get-api-key
+   :key 'gptel-api-key
    :stream t
    :models '("gpt-3.5-turbo" "gpt-3.5-turbo-16k" "gpt-4" "gpt-4-32k" "gpt-4-1106-preview")))
 
@@ -412,16 +414,25 @@ and \"apikey\" as USER."
     (user-error "No `gptel-api-key' found in the auth source")))
 
 ;; FIXME Should we utf-8 encode the api-key here?
-(defun gptel--get-api-key ()
-  "Get api key from `gptel-api-key'."
-  (pcase gptel-api-key
-    ((pred stringp) gptel-api-key)
-    ((pred functionp) (funcall gptel-api-key))
-    (_ (error "`gptel-api-key' is not set"))))
+(defun gptel--get-api-key (&optional key)
+  "Get api key from KEY, or from `gptel-api-key'."
+  (when-let* ((key-sym (or key (gptel-backend-key gptel-backend))))
+    (cl-typecase key-sym
+      (function (funcall key-sym))
+      (string key-sym)
+      (symbol (gptel--get-api-key
+               (symbol-value key-sym)))
+      (t (error "`gptel-api-key' is not valid")))))
 
 (defsubst gptel--numberize (val)
   "Ensure VAL is a number."
   (if (stringp val) (string-to-number val) val))
+
+(defmacro gptel--at-word-end (&rest body)
+  "Execute BODY at end of the current word or punctuation."
+  `(save-excursion
+     (skip-syntax-forward "w.")
+     ,@body))
 
 (defun gptel-prompt-string ()
   (or (alist-get major-mode gptel-prompt-prefix-alist) ""))
@@ -560,7 +571,7 @@ opening the file."
                          (gptel--button-buttonize (concat "[" gptel-model "]")
                           (lambda (&rest _) (gptel-menu)))
                          'mouse-face 'highlight
-                         'help-echo "OpenAI GPT model in use")))))))
+                         'help-echo "GPT model in use")))))))
     (setq header-line-format gptel--old-header-line)))
 
 (defun gptel--update-header-line (msg face)
@@ -576,7 +587,11 @@ opening the file."
                position context
                (stream nil) (in-place nil)
                (system gptel--system-message))
-  "Request a response from ChatGPT for PROMPT.
+  "Request a response from the `gptel-backend' for PROMPT.
+
+Note: This function is not fully self-contained. Consider
+let-binding the parameters `gptel-backend' and `gptel-model'
+around calls to it as required.
 
 If PROMPT is
 - a string, it is used to create a full prompt suitable for
@@ -653,19 +668,23 @@ Model parameters can be let-bound around calls to this function."
            ((null position)
             (if (use-region-p)
                 (set-marker (make-marker) (region-end))
-              (point-marker)))
+              (gptel--at-word-end (point-marker))))
            ((markerp position) position)
            ((integerp position)
             (set-marker (make-marker) position buffer))))
          (full-prompt
-         (cond
-          ((null prompt)
-           (let ((gptel--system-message system))
-             (gptel--create-prompt start-marker)))
-          ((stringp prompt)
-           `((:role "system" :content ,system)
-             (:role "user"   :content ,prompt)))
-          ((consp prompt) prompt)))
+          (cond
+           ((null prompt)
+            (let ((gptel--system-message system))
+              (gptel--create-prompt start-marker)))
+           ((stringp prompt)
+            ;; FIXME Dear reader, welcome to Jank City:
+            (with-temp-buffer
+              (let ((gptel--system-message system)
+                    (gptel-backend (buffer-local-value 'gptel-backend buffer)))
+                (insert prompt)
+                (gptel--create-prompt))))
+           ((consp prompt) prompt)))
          (info (list :prompt full-prompt
                      :buffer buffer
                      :position start-marker)))
@@ -690,7 +709,7 @@ instead."
   (let* ((response-pt
           (if (use-region-p)
               (set-marker (make-marker) (region-end))
-            (point-marker)))
+            (gptel--at-word-end (point-marker))))
          (gptel-buffer (current-buffer))
          (full-prompt (gptel--create-prompt response-pt)))
     (funcall
@@ -862,6 +881,7 @@ Call CALLBACK with the response and INFO afterwards. If omitted
 the response is inserted into the current buffer after point."
   (let* ((inhibit-message t)
          (message-log-max nil)
+         (backend gptel-backend)
          (url-request-method "POST")
          (url-request-extra-headers
           (append '(("Content-Type" . "application/json"))
@@ -877,7 +897,7 @@ the response is inserted into the current buffer after point."
     (url-retrieve (gptel-backend-url gptel-backend)
                   (lambda (_)
                     (pcase-let ((`(,response ,http-msg ,error)
-                                 (gptel--url-parse-response (current-buffer))))
+                                 (gptel--url-parse-response backend (current-buffer))))
                       (plist-put info :status http-msg)
                       (when error (plist-put info :error error))
                       (funcall (or callback #'gptel--insert-response)
@@ -895,7 +915,7 @@ RESPONSE is the parsed JSON of the response, as a plist.
 PROC-INFO is a plist with process information and other context.
 See `gptel-curl--get-response' for its contents.")
 
-(defun gptel--url-parse-response (response-buffer)
+(defun gptel--url-parse-response (backend response-buffer)
   "Parse response in RESPONSE-BUFFER."
   (when (buffer-live-p response-buffer)
     (when gptel--debug
@@ -914,14 +934,21 @@ See `gptel-curl--get-response' for its contents.")
                                      (json-readtable-error 'json-read-error))))))
           (cond
            ((string-match-p "200 OK" http-msg)
-            (list (string-trim (gptel--parse-response gptel-backend response
+            (list (string-trim (gptel--parse-response backend response
                                              '(:buffer response-buffer)))
                    http-msg))
            ((plist-get response :error)
-            (let* ((error-plist (plist-get response :error))
-                   (error-msg (plist-get error-plist :message))
-                   (error-type (plist-get error-plist :type)))
-              (list nil (concat "(" http-msg ") " error-type) error-msg)))
+            (let* ((error-data (plist-get response :error))
+                   (error-msg (plist-get error-data :message))
+                   (error-type (plist-get error-data :type))
+                   (backend-name (gptel-backend-name backend)))
+              (if (stringp error-data)
+                  (progn (message "%s error: (%s) %s" backend-name http-msg error-data)
+                         (setq error-msg (string-trim error-data)))
+                (when (stringp error-msg)
+                  (message "%s error: (%s) %s" backend-name http-msg (string-trim error-msg)))
+                (when error-type (setq http-msg (concat "("  http-msg ") " (string-trim error-type)))))
+              (list nil (concat "(" http-msg ") " (or error-msg "")))))
            ((eq response 'json-read-error)
             (list nil (concat "(" http-msg ") Malformed JSON in response.") "json-read-error"))
            (t (list nil (concat "(" http-msg ") Could not parse HTTP response.")
@@ -930,7 +957,7 @@ See `gptel-curl--get-response' for its contents.")
               "Could not parse HTTP response.")))))
 
 ;;;###autoload
-(defun gptel (name &optional api-key initial)
+(defun gptel (name &optional _ initial)
   "Switch to or start ChatGPT session with NAME.
 
 With a prefix arg, query for a (new) session name.
@@ -942,16 +969,20 @@ buffer created or switched to."
   (interactive (list (if current-prefix-arg
                          (read-string "Session name: " (generate-new-buffer-name gptel-default-session))
                        gptel-default-session)
-                     (condition-case nil
-                         (gptel--get-api-key)
-                       ((error user-error)
-                        (setq gptel-api-key
-                              (read-passwd "OpenAI API key: "))))
+                     (let ((backend (default-value 'gptel-backend)))
+                       (condition-case nil
+                           (gptel--get-api-key
+                            (gptel-backend-key backend))
+                         ((error user-error)
+                          (setq gptel-api-key
+                                (read-passwd
+                                 (format "%s API key: "
+                                         (gptel-backend-name backend)))))))
                      (and (use-region-p)
                           (buffer-substring (region-beginning)
                                             (region-end)))))
-  (unless api-key
-    (user-error "No API key available"))
+  ;; (unless api-key
+  ;;   (user-error "No API key available"))
   (with-current-buffer (get-buffer-create name)
     (cond ;Set major mode
      ((eq major-mode gptel-default-mode))

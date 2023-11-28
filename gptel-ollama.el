@@ -31,6 +31,12 @@
                             (:copier nil)
                             (:include gptel-backend)))
 
+(defvar-local gptel--ollama-context nil
+  "Context for ollama conversations.
+
+This variable holds the context array for conversations with
+Ollama models.")
+
 (cl-defmethod gptel-curl--parse-stream ((_backend gptel-ollama) info)
   ";TODO: "
   (when (bobp)
@@ -47,7 +53,7 @@
             (unless (eq done json-false)
               (with-current-buffer (plist-get info :buffer)
                 (setq gptel--ollama-context (map-elt content :context)))
-              (end-of-buffer))))
+              (goto-char (point-max)))))
       (error (forward-line 0)))
     (apply #'concat (nreverse content-strs))))
 
@@ -70,20 +76,23 @@
     prompts-plist))
 
 (cl-defmethod gptel--parse-buffer ((_backend gptel-ollama) &optional _max-entries)
-  (let ((prompts) (prop))
-    (setq prop (text-property-search-backward
-                'gptel 'response
-                (when (get-char-property (max (point-min) (1- (point)))
-                                         'gptel)
-                  t)))
-    (if (prop-match-value prop)
+  (let ((prompts)
+        (prop (text-property-search-backward
+               'gptel 'response
+               (when (get-char-property (max (point-min) (1- (point)))
+                                        'gptel)
+                 t))))
+    (if (and (prop-match-p prop)
+             (prop-match-value prop))
         (user-error "No user prompt found!")
       (setq prompts (list
                      :system gptel--system-message
                      :prompt
-                     (string-trim (buffer-substring-no-properties (prop-match-beginning prop)
-                                                                  (prop-match-end prop))
-                                  "[*# \t\n\r]+"))))))
+                     (if (prop-match-p prop)
+                         (string-trim (buffer-substring-no-properties (prop-match-beginning prop)
+                                                                      (prop-match-end prop))
+                                      "[*# \t\n\r]+")
+                       ""))))))
 
 ;;;###autoload
 (cl-defun gptel-make-ollama
@@ -139,12 +148,6 @@ Example:
       (setf (alist-get name gptel--known-backends
                        nil nil #'equal)
                   backend))))
-
-(defvar-local gptel--ollama-context nil
-  "Context for ollama conversations.
-
-This variable holds the context array for conversations with
-Ollama models.")
 
 (provide 'gptel-ollama)
 ;;; gptel-ollama.el ends here
